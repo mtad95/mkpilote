@@ -636,6 +636,7 @@ const sb = window.supabase.createClient(SUPA_URL, SUPA_KEY)
 
 let currentUser = null
 let isLoadingData = false  // Guard contre les appels concurrents
+let dataLoaded = false     // Guard contre rechargement au retour d'onglet
 
 // ══════════════════════════════════════════════
 // LOADING
@@ -698,20 +699,25 @@ async function logout(){
 
 // ── Auth state — gère TOUS les changements de session ──
 sb.auth.onAuthStateChange(async (event, session) => {
-  // Ignorer les événements qui ne changent pas l'état réel
+  // Ignorer les events qui ne changent pas l'état réel
   if(event === 'TOKEN_REFRESHED') return
   if(event === 'PASSWORD_RECOVERY') return
 
   if(session && session.user){
-    // Déjà connecté avec le même user → ne rien faire
-    if(currentUser && currentUser.id === session.user.id && event !== 'SIGNED_IN') return
+    const sameUser = currentUser && currentUser.id === session.user.id
+
+    // Si même user et données déjà chargées → ne rien faire (retour d'onglet PDF etc.)
+    if(sameUser && dataLoaded) return
+
     currentUser = session.user
+    dataLoaded = false
     document.getElementById('auth-screen').style.display='none'
     document.getElementById('user-email-display').textContent=currentUser.email
     document.getElementById('topbar-avatar').textContent=currentUser.email.slice(0,2).toUpperCase()
     await loadAllData()
   } else {
     currentUser=null
+    dataLoaded=false
     recettes=[]; depenses=[]; clients=[]
     renderAll()
     showLoading(false)
@@ -738,6 +744,7 @@ async function loadAllData(){
     recettes=(recs||[]).map(r=>({id:r.id,montant:parseFloat(r.montant)||0,desc:r.description||'',client:r.client||'—',cat:r.categorie||'Autre',statut:r.statut||'Payé',date:new Date(r.created_at).getTime()}))
     depenses=(deps||[]).map(d=>({id:d.id,montant:parseFloat(d.montant)||0,libelle:d.libelle||'',cat:d.categorie||'Autre',date:new Date(d.created_at).getTime()}))
     clients=(cls||[]).map(c=>({id:c.id,nom:c.nom||'',type:c.type||'Particulier',tel:c.telephone||'',email:c.email||'',notes:c.notes||''}))
+    dataLoaded=true
     renderAll()
   } catch(e) {
     console.error('loadAllData error:',e)
