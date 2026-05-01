@@ -635,6 +635,14 @@ const SUPA_KEY = 'sb_publishable_ALEWLLgnETODHGKS-84_DQ_JFtv7MQq'
 const sb = window.supabase.createClient(SUPA_URL, SUPA_KEY)
 
 let currentUser = null
+let isLoadingData = false  // Guard contre les appels concurrents
+
+// ══════════════════════════════════════════════
+// LOADING
+// ══════════════════════════════════════════════
+function showLoading(v){
+  document.getElementById('loading-overlay').classList.toggle('show', v)
+}
 
 // ══════════════════════════════════════════════
 // AUTH
@@ -642,75 +650,72 @@ let currentUser = null
 function showAuthTab(tab){
   document.getElementById('auth-login').style.display = tab==='login'?'block':'none'
   document.getElementById('auth-register').style.display = tab==='register'?'block':'none'
-  document.querySelectorAll('.auth-tab').forEach((t,i)=>t.classList.toggle('active', (i===0&&tab==='login')||(i===1&&tab==='register')))
+  document.querySelectorAll('.auth-tab').forEach((t,i)=>t.classList.toggle('active',(i===0&&tab==='login')||(i===1&&tab==='register')))
 }
 
 async function login(){
-  const email = document.getElementById('login-email').value.trim()
-  const password = document.getElementById('login-password').value
-  const errEl = document.getElementById('login-error')
+  const email=document.getElementById('login-email').value.trim()
+  const password=document.getElementById('login-password').value
+  const errEl=document.getElementById('login-error')
   errEl.style.display='none'
   if(!email||!password){ errEl.textContent='Email et mot de passe requis'; errEl.style.display='block'; return }
   showLoading(true)
-  const { error } = await sb.auth.signInWithPassword({ email, password })
-  showLoading(false)
-  if(error){ errEl.textContent='Email ou mot de passe incorrect'; errEl.style.display='block' }
+  try {
+    const { error } = await sb.auth.signInWithPassword({ email, password })
+    if(error){ showLoading(false); errEl.textContent='Email ou mot de passe incorrect'; errEl.style.display='block' }
+    // Si succès: onAuthStateChange prend le relais et ferme le spinner
+  } catch(e) {
+    showLoading(false)
+    errEl.textContent='Erreur réseau — réessaie'; errEl.style.display='block'
+  }
 }
 
 async function register(){
-  const email = document.getElementById('reg-email').value.trim()
-  const password = document.getElementById('reg-password').value
-  const errEl = document.getElementById('reg-error')
-  const succEl = document.getElementById('reg-success')
+  const email=document.getElementById('reg-email').value.trim()
+  const password=document.getElementById('reg-password').value
+  const errEl=document.getElementById('reg-error')
+  const succEl=document.getElementById('reg-success')
   errEl.style.display='none'; succEl.style.display='none'
   if(!email||!password){ errEl.textContent='Email et mot de passe requis'; errEl.style.display='block'; return }
   if(password.length<6){ errEl.textContent='Mot de passe trop court (min. 6 caractères)'; errEl.style.display='block'; return }
   showLoading(true)
-  const { error } = await sb.auth.signUp({ email, password })
-  showLoading(false)
-  if(error){ errEl.textContent=error.message; errEl.style.display='block' }
-  else { succEl.style.display='block' }
+  try {
+    const { error } = await sb.auth.signUp({ email, password })
+    showLoading(false)
+    if(error){ errEl.textContent=error.message; errEl.style.display='block' }
+    else { succEl.style.display='block' }
+  } catch(e) {
+    showLoading(false)
+    errEl.textContent='Erreur réseau — réessaie'; errEl.style.display='block'
+  }
 }
 
 async function logout(){
+  showLoading(true)
   await sb.auth.signOut()
+  showLoading(false)
 }
 
-function showLoading(v){
-  document.getElementById('loading-overlay').classList.toggle('show', v)
-}
-
-// Auth state listener — point d'entrée principal
-let authHandled = false
-const loadingTimeout = setTimeout(()=>{
-  if(!authHandled){
-    showLoading(false)
-    document.getElementById('auth-screen').style.display = 'flex'
-  }
-}, 4000)
-
+// ── Auth state — gère TOUS les changements de session ──
 sb.auth.onAuthStateChange(async (event, session) => {
-  authHandled = true
-  clearTimeout(loadingTimeout)
+  // Ignorer les événements qui ne changent pas l'état réel
+  if(event === 'TOKEN_REFRESHED') return
+  if(event === 'PASSWORD_RECOVERY') return
+
   if(session && session.user){
+    // Déjà connecté avec le même user → ne rien faire
+    if(currentUser && currentUser.id === session.user.id && event !== 'SIGNED_IN') return
     currentUser = session.user
-    document.getElementById('auth-screen').style.display = 'none'
-    document.getElementById('user-email-display').textContent = currentUser.email
-    const initials = currentUser.email.slice(0,2).toUpperCase()
-    document.getElementById('topbar-avatar').textContent = initials
-    showLoading(true)
-    try {
-      await loadAllData()
-    } catch(e) {
-      console.error(e)
-    }
-    showLoading(false)
+    document.getElementById('auth-screen').style.display='none'
+    document.getElementById('user-email-display').textContent=currentUser.email
+    document.getElementById('topbar-avatar').textContent=currentUser.email.slice(0,2).toUpperCase()
+    await loadAllData()
   } else {
-    currentUser = null
+    currentUser=null
     recettes=[]; depenses=[]; clients=[]
     renderAll()
-    document.getElementById('auth-screen').style.display = 'flex'
     showLoading(false)
+    document.getElementById('auth-screen').style.display='flex'
   }
 })
 
@@ -719,16 +724,28 @@ sb.auth.onAuthStateChange(async (event, session) => {
 // ══════════════════════════════════════════════
 async function loadAllData(){
   if(!currentUser) return
-  const uid = currentUser.id
-  const [{ data: recs }, { data: deps }, { data: cls }] = await Promise.all([
-    sb.from('recettes').select('*').eq('user_id', uid).order('created_at',{ascending:false}),
-    sb.from('depenses').select('*').eq('user_id', uid).order('created_at',{ascending:false}),
-    sb.from('clients').select('*').eq('user_id', uid).order('created_at',{ascending:false})
-  ])
-  recettes = (recs||[]).map(r=>({id:r.id,montant:parseFloat(r.montant),desc:r.description,client:r.client||'—',cat:r.categorie,statut:r.statut,date:new Date(r.created_at).getTime()}))
-  depenses = (deps||[]).map(d=>({id:d.id,montant:parseFloat(d.montant),libelle:d.libelle,cat:d.categorie,date:new Date(d.created_at).getTime()}))
-  clients  = (cls||[]).map(c=>({id:c.id,nom:c.nom,type:c.type,tel:c.telephone,email:c.email,notes:c.notes}))
-  renderAll()
+  if(isLoadingData) return  // Empêche les appels concurrents
+  isLoadingData = true
+  showLoading(true)
+  try {
+    const uid=currentUser.id
+    const [{ data:recs, error:e1 },{ data:deps, error:e2 },{ data:cls, error:e3 }] = await Promise.all([
+      sb.from('recettes').select('*').eq('user_id',uid).order('created_at',{ascending:false}),
+      sb.from('depenses').select('*').eq('user_id',uid).order('created_at',{ascending:false}),
+      sb.from('clients').select('*').eq('user_id',uid).order('created_at',{ascending:false})
+    ])
+    if(e1||e2||e3) console.error('Supabase errors:',e1,e2,e3)
+    recettes=(recs||[]).map(r=>({id:r.id,montant:parseFloat(r.montant)||0,desc:r.description||'',client:r.client||'—',cat:r.categorie||'Autre',statut:r.statut||'Payé',date:new Date(r.created_at).getTime()}))
+    depenses=(deps||[]).map(d=>({id:d.id,montant:parseFloat(d.montant)||0,libelle:d.libelle||'',cat:d.categorie||'Autre',date:new Date(d.created_at).getTime()}))
+    clients=(cls||[]).map(c=>({id:c.id,nom:c.nom||'',type:c.type||'Particulier',tel:c.telephone||'',email:c.email||'',notes:c.notes||''}))
+    renderAll()
+  } catch(e) {
+    console.error('loadAllData error:',e)
+    showToast('⚠ Erreur de chargement','var(--danger)')
+  } finally {
+    isLoadingData=false
+    showLoading(false)
+  }
 }
 
 function renderAll(){
@@ -740,25 +757,26 @@ function renderAll(){
 // ══════════════════════════════════════════════
 let isPro=false, recettes=[], depenses=[], clients=[]
 let recFilter='all', depFilter='all', objectif=0
+let exportDebut=null, exportFin=null  // Déclarés ici pour éviter ReferenceError
 const LIMIT_FREE=20
 const CAT_COLORS={'Loyer':'#c0392b','Stock / Achat':'#d4580e','Marketing':'#b07d1a','Salaires':'#2d7a4f','Transport':'#2980b9','Abonnement':'#8e44ad','Matériel':'#16a085','Autre':'#7f8c8d','Prestation':'#2d7a4f','Produit':'#d4580e','Commission':'#b07d1a'}
 
-document.getElementById('topbar-date').textContent = new Date().toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'})
+document.getElementById('topbar-date').textContent=new Date().toLocaleDateString('fr-FR',{weekday:'long',day:'numeric',month:'long',year:'numeric'})
+
+// Init exportDebut/Fin au mois courant
+;(()=>{ const n=new Date(); exportDebut=new Date(n.getFullYear(),n.getMonth(),1); exportFin=new Date(n.getFullYear(),n.getMonth()+1,0) })()
 
 // ══════════════════════════════════════════════
 // PLAN TOGGLE
 // ══════════════════════════════════════════════
-function togglePlan(){
-  isPro=!isPro; applyPlan()
-}
+function togglePlan(){ isPro=!isPro; applyPlan() }
 function applyPlan(){
   const tog=document.getElementById('plan-toggle')
   const badge=document.getElementById('current-badge')
-  const lblFree=document.getElementById('lbl-free')
-  const lblPro=document.getElementById('lbl-pro')
   if(isPro){
     tog.classList.add('pro'); badge.className='pro-badge'; badge.textContent='PRO'
-    lblFree.style.color='rgba(255,255,255,0.35)'; lblPro.style.color='#fff'
+    document.getElementById('lbl-free').style.color='rgba(255,255,255,0.35)'
+    document.getElementById('lbl-pro').style.color='#fff'
     document.getElementById('plan-info-box').classList.add('is-pro')
     document.getElementById('plan-info-name').classList.add('is-pro')
     document.getElementById('plan-info-name').textContent='⚡ Plan Pro'
@@ -775,7 +793,8 @@ function applyPlan(){
     showToast('Mode Pro activé','var(--pro)')
   } else {
     tog.classList.remove('pro'); badge.className='free-badge'; badge.textContent='GRATUIT'
-    lblFree.style.color='#fff'; lblPro.style.color='rgba(255,255,255,0.35)'
+    document.getElementById('lbl-free').style.color='#fff'
+    document.getElementById('lbl-pro').style.color='rgba(255,255,255,0.35)'
     document.getElementById('plan-info-box').classList.remove('is-pro')
     document.getElementById('plan-info-name').classList.remove('is-pro')
     document.getElementById('plan-info-name').textContent='Plan Gratuit'
@@ -850,37 +869,43 @@ function updateObjectif(){
 }
 
 // ══════════════════════════════════════════════
-// CLIENTS
+// CLIENTS — utilise data-id pour éviter bugs apostrophes
 // ══════════════════════════════════════════════
 function populateClientSelect(){
-  document.getElementById('r-client').innerHTML='<option value="">— Sans client</option>'+clients.map(c=>`<option>${c.nom}</option>`).join('')
+  document.getElementById('r-client').innerHTML='<option value="">— Sans client</option>'+clients.map(c=>`<option value="${c.nom}">${c.nom}</option>`).join('')
 }
 
 async function ajouterClient(){
   const nom=document.getElementById('c-nom').value.trim()
   if(!nom){ showToast('⚠ Renseigne un nom'); return }
   if(clients.find(c=>c.nom===nom)){ showToast('⚠ Client déjà existant'); return }
-  showLoading(true)
-  const { error } = await sb.from('clients').insert({user_id:currentUser.id,nom,type:document.getElementById('c-type').value,telephone:document.getElementById('c-tel').value,email:document.getElementById('c-email').value,notes:''})
-  showLoading(false)
-  if(error){ showToast('Erreur: '+error.message); return }
-  ['c-nom','c-tel','c-email'].forEach(i=>document.getElementById(i).value='')
-  closeModal('clientModal')
-  await loadAllData()
-  showToast(`Client "${nom}" ajouté ✓`,'var(--success)')
+  if(!currentUser){ showToast('⚠ Non connecté'); return }
+  try {
+    const { error }=await sb.from('clients').insert({user_id:currentUser.id,nom,type:document.getElementById('c-type').value,telephone:document.getElementById('c-tel').value,email:document.getElementById('c-email').value,notes:''})
+    if(error){ showToast('Erreur: '+error.message); return }
+    ['c-nom','c-tel','c-email'].forEach(i=>document.getElementById(i).value='')
+    closeModal('clientModal')
+    await loadAllData()
+    showToast(`Client "${nom}" ajouté ✓`,'var(--success)')
+  } catch(e){ showToast('Erreur réseau','var(--danger)') }
 }
 
 async function supprimerClient(id){
-  showLoading(true)
-  await sb.from('clients').delete().eq('id',id)
-  await loadAllData()
-  showLoading(false)
-  showToast('Client supprimé')
+  try {
+    await sb.from('clients').delete().eq('id',id)
+    await loadAllData()
+    showToast('Client supprimé')
+  } catch(e){ showToast('Erreur suppression','var(--danger)') }
 }
 
-function relancerClient(clientNom,montant,desc){
+// Stockage des IDs clients pour les boutons onclick
+const clientActions = {}
+function relancerClientById(cid){
+  const c=clients.find(x=>x.id===cid); if(!c) return
+  const dette=recettes.filter(r=>r.client===c.nom&&(r.statut==='Impayé'||r.statut==='En attente')).reduce((s,r)=>s+r.montant,0)
+  const desc=recettes.filter(r=>r.client===c.nom&&r.statut==='Impayé').map(r=>r.desc).join(', ')||'prestation'
   if(!isPro){ openModal('upgradeModal'); return }
-  const msg=`Bonjour ${clientNom},\n\nJ'espère que vous allez bien.\n\nJe me permets de vous relancer concernant le règlement de ${montant}€ pour : ${desc}.\n\nPourriez-vous procéder au paiement dans les meilleurs délais ?\n\nMerci d'avance,\nCordialement`
+  const msg=`Bonjour ${c.nom},\n\nJ'espere que vous allez bien.\n\nJe me permets de vous relancer concernant le reglement de ${dette}€ pour : ${desc}.\n\nPourriez-vous proceder au paiement dans les meilleurs delais ?\n\nMerci d'avance,\nCordialement`
   document.getElementById('relance-msg').textContent=msg
   openModal('relanceModal')
 }
@@ -896,11 +921,10 @@ function renderClients(){
   document.getElementById('clients-sub').textContent=`${clients.length} client(s)`
   if(clients.length===0){ grid.innerHTML='<div style="color:var(--muted);font-size:12px;padding:48px 0;text-align:center;grid-column:1/-1">Aucun client — clique sur "+ Nouveau client"</div>'; return }
   grid.innerHTML=clients.map(c=>{
-    const init=c.nom.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2)
+    const init=c.nom.split(' ').map(w=>w[0]).join('').toUpperCase().slice(0,2)||'?'
     const ca=recettes.filter(r=>r.client===c.nom&&r.statut==='Payé').reduce((s,r)=>s+r.montant,0)
     const dette=recettes.filter(r=>r.client===c.nom&&(r.statut==='Impayé'||r.statut==='En attente')).reduce((s,r)=>s+r.montant,0)
     const nb=recettes.filter(r=>r.client===c.nom).length
-    const descImp=recettes.filter(r=>r.client===c.nom&&r.statut==='Impayé').map(r=>r.desc).join(', ')
     return `<div class="client-card">
       <div class="c-initials">${init}</div>
       <div class="c-name">${c.nom}</div>
@@ -910,7 +934,7 @@ function renderClients(){
         <div><div class="c-stat-label">En attente</div><div class="c-stat-val ${dette>0?'red':''}">${dette.toFixed(0)}€</div></div>
       </div>
       <div class="c-footer">
-        ${dette>0?`<button class="btn btn-warn btn-sm" onclick="relancerClient('${c.nom}',${dette},'${descImp||'prestation'}')">📲 Relancer</button>`:''}
+        ${dette>0?`<button class="btn btn-warn btn-sm" onclick="relancerClientById('${c.id}')">📲 Relancer</button>`:''}
         <button class="btn btn-danger btn-sm" onclick="supprimerClient('${c.id}')">Supprimer</button>
       </div>
     </div>`
@@ -925,30 +949,31 @@ async function ajouterRecette(){
   const desc=document.getElementById('r-desc').value.trim()
   if(!montant||montant<=0){ showToast('⚠ Montant invalide'); return }
   if(!desc){ showToast('⚠ Description requise'); return }
-  showLoading(true)
-  const { error } = await sb.from('recettes').insert({user_id:currentUser.id,montant,description:desc,client:document.getElementById('r-client').value||null,categorie:document.getElementById('r-cat').value,statut:document.getElementById('r-statut').value})
-  showLoading(false)
-  if(error){ showToast('Erreur: '+error.message); return }
-  ['r-montant','r-desc'].forEach(i=>document.getElementById(i).value='')
-  closeModal('recetteModal')
-  await loadAllData()
-  showToast(`+${montant}€ enregistrée ✓`,'var(--success)')
+  if(!currentUser){ showToast('⚠ Non connecté'); return }
+  try {
+    const { error }=await sb.from('recettes').insert({user_id:currentUser.id,montant,description:desc,client:document.getElementById('r-client').value||null,categorie:document.getElementById('r-cat').value,statut:document.getElementById('r-statut').value})
+    if(error){ showToast('Erreur: '+error.message); return }
+    ['r-montant','r-desc'].forEach(i=>document.getElementById(i).value='')
+    closeModal('recetteModal')
+    await loadAllData()
+    showToast(`+${montant}€ enregistrée ✓`,'var(--success)')
+  } catch(e){ showToast('Erreur réseau','var(--danger)') }
 }
 
 async function marquerPaye(id){
-  showLoading(true)
-  await sb.from('recettes').update({statut:'Payé'}).eq('id',id)
-  await loadAllData()
-  showLoading(false)
-  showToast('Marquée comme payée ✓','var(--success)')
+  try {
+    await sb.from('recettes').update({statut:'Payé'}).eq('id',id)
+    await loadAllData()
+    showToast('Marquée comme payée ✓','var(--success)')
+  } catch(e){ showToast('Erreur','var(--danger)') }
 }
 
 async function supprimerRecette(id){
-  showLoading(true)
-  await sb.from('recettes').delete().eq('id',id)
-  await loadAllData()
-  showLoading(false)
-  showToast('Recette supprimée')
+  try {
+    await sb.from('recettes').delete().eq('id',id)
+    await loadAllData()
+    showToast('Recette supprimée')
+  } catch(e){ showToast('Erreur suppression','var(--danger)') }
 }
 
 function filterRec(f,el){
@@ -969,10 +994,9 @@ function renderRecettes(){
     <td>${r.client}</td><td>${r.desc}</td>
     <td><span class="cat-dot" style="background:${CAT_COLORS[r.cat]||'#8a8278'}"></span>${r.cat}</td>
     <td style="font-family:var(--font-head);font-weight:700">+${r.montant.toFixed(0)}€</td>
-    <td><span class="badge ${bMap[r.statut]}">${r.statut}</span></td>
+    <td><span class="badge ${bMap[r.statut]||'badge-grey'}">${r.statut}</span></td>
     <td style="display:flex;gap:6px;flex-wrap:wrap">
       ${r.statut!=='Payé'?`<button class="btn btn-success btn-sm" onclick="marquerPaye('${r.id}')">✓ Payé</button>`:''}
-      ${r.statut==='Impayé'?`<button class="btn btn-warn btn-sm" onclick="relancerClient('${r.client}',${r.montant},'${r.desc}')">📲</button>`:''}
       <button class="btn btn-danger btn-sm" onclick="supprimerRecette('${r.id}')">×</button>
     </td>
   </tr>`).join('')
@@ -986,22 +1010,23 @@ async function ajouterDepense(){
   const libelle=document.getElementById('d-libelle').value.trim()
   if(!montant||montant<=0){ showToast('⚠ Montant invalide'); return }
   if(!libelle){ showToast('⚠ Libellé requis'); return }
-  showLoading(true)
-  const { error } = await sb.from('depenses').insert({user_id:currentUser.id,montant,libelle,categorie:document.getElementById('d-cat').value})
-  showLoading(false)
-  if(error){ showToast('Erreur: '+error.message); return }
-  ['d-montant','d-libelle'].forEach(i=>document.getElementById(i).value='')
-  closeModal('depenseModal')
-  await loadAllData()
-  showToast(`-${montant}€ enregistrée`,'var(--danger)')
+  if(!currentUser){ showToast('⚠ Non connecté'); return }
+  try {
+    const { error }=await sb.from('depenses').insert({user_id:currentUser.id,montant,libelle,categorie:document.getElementById('d-cat').value})
+    if(error){ showToast('Erreur: '+error.message); return }
+    ['d-montant','d-libelle'].forEach(i=>document.getElementById(i).value='')
+    closeModal('depenseModal')
+    await loadAllData()
+    showToast(`-${montant}€ enregistrée`,'var(--danger)')
+  } catch(e){ showToast('Erreur réseau','var(--danger)') }
 }
 
 async function supprimerDepense(id){
-  showLoading(true)
-  await sb.from('depenses').delete().eq('id',id)
-  await loadAllData()
-  showLoading(false)
-  showToast('Dépense supprimée')
+  try {
+    await sb.from('depenses').delete().eq('id',id)
+    await loadAllData()
+    showToast('Dépense supprimée')
+  } catch(e){ showToast('Erreur suppression','var(--danger)') }
 }
 
 function filterDep(f,el){
@@ -1057,11 +1082,20 @@ function renderDashboard(){
     fill.style.background=pct>=100?'var(--success)':pct>=60?'var(--accent)':'var(--danger)'
   }
 
+  const bMap={'Payé':'badge-green','En attente':'badge-warn','Impayé':'badge-red'}
   const ops=[...recettes.slice(0,4).map(r=>({date:r.date,label:r.desc,type:'rec',montant:r.montant,statut:r.statut,id:r.id})),...depenses.slice(0,2).map(d=>({date:d.date,label:d.libelle,type:'dep',montant:d.montant}))].sort((a,b)=>b.date-a.date).slice(0,6)
   const opsBody=document.getElementById('dash-ops')
-  const bMap={'Payé':'badge-green','En attente':'badge-warn','Impayé':'badge-red'}
-  if(ops.length===0){ opsBody.innerHTML='<tr class="empty-row"><td colspan="5">Aucune opération — commence par ajouter une recette</td></tr>' }
-  else { opsBody.innerHTML=ops.map(o=>`<tr><td style="color:var(--muted)">${new Date(o.date).toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'})}</td><td>${o.label}</td><td>${o.type==='rec'?`<span class="badge ${bMap[o.statut]}">${o.statut}</span>`:'<span class="badge badge-red">Dépense</span>'}</td><td style="font-family:var(--font-head);font-weight:700;color:${o.type==='rec'?'var(--success)':'var(--danger)'}">${o.type==='rec'?'+':'-'}${o.montant.toFixed(0)}€</td><td>${o.type==='rec'&&o.statut!=='Payé'?`<button class="btn btn-success btn-sm" onclick="marquerPaye('${o.id}')">✓ Payé</button>`:''}</td></tr>`).join('') }
+  if(ops.length===0){
+    opsBody.innerHTML='<tr class="empty-row"><td colspan="5">Aucune opération</td></tr>'
+  } else {
+    opsBody.innerHTML=ops.map(o=>`<tr>
+      <td style="color:var(--muted)">${new Date(o.date).toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'})}</td>
+      <td>${o.label}</td>
+      <td>${o.type==='rec'?`<span class="badge ${bMap[o.statut]||'badge-grey'}">${o.statut}</span>`:'<span class="badge badge-red">Dépense</span>'}</td>
+      <td style="font-family:var(--font-head);font-weight:700;color:${o.type==='rec'?'var(--success)':'var(--danger)'}">${o.type==='rec'?'+':'-'}${o.montant.toFixed(0)}€</td>
+      <td>${o.type==='rec'&&o.statut!=='Payé'?`<button class="btn btn-success btn-sm" onclick="marquerPaye('${o.id}')">✓ Payé</button>`:''}</td>
+    </tr>`).join('')
+  }
 
   const alertDiv=document.getElementById('dash-alertes')
   const alertes=[]
@@ -1084,13 +1118,12 @@ function renderHistorique(){
   const bMap={'Payé':'badge-green','En attente':'badge-warn','Impayé':'badge-red'}
   const ops=[...recettes.map(r=>({date:r.date,label:r.desc,type:'rec',montant:r.montant,statut:r.statut})),...depenses.map(d=>({date:d.date,label:d.libelle,type:'dep',montant:d.montant}))].sort((a,b)=>b.date-a.date)
   if(ops.length===0){ body.innerHTML='<tr class="empty-row"><td colspan="4">Aucune opération</td></tr>'; return }
-  body.innerHTML=ops.map(o=>`<tr><td style="color:var(--muted)">${new Date(o.date).toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'})}</td><td>${o.label}</td><td>${o.type==='rec'?`<span class="badge ${bMap[o.statut]}">${o.statut}</span>`:'<span class="badge badge-red">Dépense</span>'}</td><td style="font-family:var(--font-head);font-weight:700;color:${o.type==='rec'?'var(--success)':'var(--danger)'}">${o.type==='rec'?'+':'-'}${o.montant.toFixed(0)}€</td></tr>`).join('')
+  body.innerHTML=ops.map(o=>`<tr><td style="color:var(--muted)">${new Date(o.date).toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'})}</td><td>${o.label}</td><td>${o.type==='rec'?`<span class="badge ${bMap[o.statut]||'badge-grey'}">${o.statut}</span>`:'<span class="badge badge-red">Dépense</span>'}</td><td style="font-family:var(--font-head);font-weight:700;color:${o.type==='rec'?'var(--success)':'var(--danger)'}">${o.type==='rec'?'+':'-'}${o.montant.toFixed(0)}€</td></tr>`).join('')
 }
 
 function renderRapports(){
   const ca=recettes.filter(r=>r.statut==='Payé').reduce((s,r)=>s+r.montant,0)
-  const dep=depenses.reduce((s,d)=>s+d.montant,0)
-  const benef=ca-dep
+  const dep=depenses.reduce((s,d)=>s+d.montant,0),benef=ca-dep
   const impMt=recettes.filter(r=>r.statut==='Impayé'||r.statut==='En attente').reduce((s,r)=>s+r.montant,0)
   document.getElementById('rpt-ca').textContent=ca.toFixed(0)+'€'
   document.getElementById('rpt-dep').textContent=dep.toFixed(0)+'€'
@@ -1107,10 +1140,8 @@ function renderRapports(){
 }
 
 // ══════════════════════════════════════════════
-// EXPORT PDF
+// EXPORT PDF — PÉRIODE
 // ══════════════════════════════════════════════
-let exportDebut=null,exportFin=null
-
 function setPreset(type,el){
   document.querySelectorAll('#exportModal .filter-btn').forEach(b=>b.classList.remove('active'))
   el.classList.add('active')
@@ -1147,62 +1178,75 @@ function getFilteredOps(debut,fin){
   return{recettes:recettes.filter(r=>r.date>=d0&&r.date<=d1),depenses:depenses.filter(d=>d.date>=d0&&d.date<=d1)}
 }
 
+// ══════════════════════════════════════════════
+// EXPORT PDF
+// ══════════════════════════════════════════════
 function exporterPDF(){
   if(!isPro){openModal('upgradeModal');return}
   const isPerso=document.getElementById('preset-perso').classList.contains('active')
-  if(isPerso){const dv=document.getElementById('export-date-debut').value,fv=document.getElementById('export-date-fin').value;if(!dv||!fv){showToast('⚠ Définis les deux dates');return};exportDebut=new Date(dv);exportFin=new Date(fv)}
+  if(isPerso){
+    const dv=document.getElementById('export-date-debut').value,fv=document.getElementById('export-date-fin').value
+    if(!dv||!fv){showToast('⚠ Définis les deux dates');return}
+    exportDebut=new Date(dv);exportFin=new Date(fv)
+  }
   if(!exportDebut||!exportFin){showToast('⚠ Sélectionne une période');return}
-  closeModal('exportModal');showToast('Génération du rapport...','var(--pro)')
-  const{jsPDF}=window.jspdf,doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'})
-  const W=210,H=297,M=14,IW=182
-  const filtered=getFilteredOps(exportDebut,exportFin),recsFil=filtered.recettes,depsFil=filtered.depenses
-  const ca=recsFil.filter(r=>r.statut==='Payé').reduce((s,r)=>s+r.montant,0)
-  const dep=depsFil.reduce((s,d)=>s+d.montant,0),benef=ca-dep
-  const impMt=recsFil.filter(r=>r.statut==='Impayé'||r.statut==='En attente').reduce((s,r)=>s+r.montant,0)
-  const marge=ca>0?((benef/ca)*100).toFixed(1):'0.0'
-  const fmtD=d=>d.toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})
-  const fmtS=d=>d.toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'})
-  const periodeStr=fmtD(exportDebut)+' au '+fmtD(exportFin),genDate=new Date().toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})
-  const filename='MK-Pilote-'+fmtS(exportDebut).replace('/','.')+'-'+fmtS(exportFin).replace('/','.')+'.pdf'
-  const C={dark:[26,23,20],white:[255,255,255],accent:[212,90,30],green:[34,107,64],red:[170,35,25],warn:[150,100,15],muted:[140,132,122],bg:[248,245,240],surface:[253,251,248],border:[220,215,207],pro:[100,40,200]}
-  const MINUS='-';let y=0
-  doc.setFillColor(...C.dark);doc.rect(0,0,W,46,'F');doc.setFillColor(...C.accent);doc.rect(0,0,4,46,'F')
-  doc.setFont('helvetica','bold');doc.setFontSize(20);doc.setTextColor(...C.white);doc.text('MK Pilote',M+2,17);doc.setTextColor(...C.accent);doc.text('.',M+2+doc.getTextWidth('MK Pilote'),17)
-  doc.setFont('helvetica','normal');doc.setFontSize(7);doc.setTextColor(170,162,150);doc.text('RAPPORT DE PILOTAGE',M+2,25)
-  doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(...C.white);doc.text(periodeStr.toUpperCase(),M+2,38)
-  doc.setFont('helvetica','normal');doc.setFontSize(7);doc.setTextColor(150,142,130);doc.text('Genere le '+genDate,W-M,25,{align:'right'})
-  doc.setFillColor(...C.pro);doc.roundedRect(W-M-18,31,18,7,1.5,1.5,'F');doc.setTextColor(...C.white);doc.setFontSize(7);doc.setFont('helvetica','bold');doc.text('PRO',W-M-9,36,{align:'center'})
-  y=54
-  const kpis=[{label:'Recettes encaissees',val:ca.toFixed(0)+'E',bar:C.green,col:C.green},{label:'Depenses totales',val:MINUS+dep.toFixed(0)+'E',bar:C.red,col:C.red},{label:'Benefice net',val:(benef>=0?'+':MINUS)+Math.abs(benef).toFixed(0)+'E',bar:benef>=0?C.green:C.red,col:benef>=0?C.green:C.red},{label:'Impayes',val:impMt.toFixed(0)+'E',bar:impMt>0?C.red:C.muted,col:impMt>0?C.red:C.muted}]
-  const KW=(IW-9)/4,KH=25
-  kpis.forEach((k,i)=>{const x=M+i*(KW+3);doc.setFillColor(...C.surface);doc.setDrawColor(...C.border);doc.setLineWidth(0.25);doc.roundedRect(x,y,KW,KH,1.5,1.5,'FD');doc.setFillColor(...k.bar);doc.rect(x,y,KW,2,'F');doc.setFont('helvetica','normal');doc.setFontSize(6.5);doc.setTextColor(...C.muted);doc.text(k.label.toUpperCase(),x+3,y+8);doc.setFont('helvetica','bold');doc.setFontSize(13);doc.setTextColor(...k.col);doc.text(k.val.replace('E','€'),x+3,y+20)})
-  y+=KH+5
-  doc.setFillColor(...C.bg);doc.setDrawColor(...C.border);doc.setLineWidth(0.25);doc.roundedRect(M,y,IW,9,1.5,1.5,'FD');doc.setFont('helvetica','normal');doc.setFontSize(8);doc.setTextColor(...C.muted);doc.text('Marge nette :',M+4,y+6);doc.setFont('helvetica','bold');doc.setTextColor(...(benef>=0?C.green:C.red));doc.text(marge+'%',M+28,y+6)
-  y+=14
-  const checkPage=(n=15)=>{if(y+n>H-14){doc.addPage();y=14}}
-  const sectionTitle=(title,color)=>{checkPage(14);doc.setFillColor(...color);doc.rect(M,y,3,5.5,'F');doc.setFont('helvetica','bold');doc.setFontSize(10);doc.setTextColor(...C.dark);doc.text(title,M+6,y+4.5);y+=9}
-  const tableHeader=(cols)=>{checkPage(10);doc.setFillColor(...C.dark);doc.rect(M,y,IW,6.5,'F');doc.setFont('helvetica','bold');doc.setFontSize(6.5);doc.setTextColor(...C.white);let x=M;cols.forEach(c=>{doc.text(c.label,x+2,y+4.5);x+=c.w});y+=6.5}
-  const tableRow=(cols,vals,idx)=>{const RH=6.5;checkPage(RH+2);if(idx%2===0){doc.setFillColor(...C.bg);doc.rect(M,y,IW,RH,'F')}let x=M;cols.forEach((c,i)=>{const raw=String(vals[i]||'');const maxC=Math.floor(c.w/1.6);const txt=raw.length>maxC?raw.slice(0,maxC-1)+'...':raw;doc.setFont('helvetica',c.bold?'bold':'normal');doc.setFontSize(7.5);doc.setTextColor(...(c.color||C.dark));doc.text(txt,x+2,y+4.5);x+=c.w});doc.setDrawColor(...C.border);doc.setLineWidth(0.2);doc.line(M,y+RH,M+IW,y+RH);y+=RH}
-  const totalRow=(label,val,color)=>{checkPage(8);doc.setFillColor(...color);doc.rect(M,y,IW,7,'F');doc.setFont('helvetica','bold');doc.setFontSize(7.5);doc.setTextColor(...C.white);doc.text(label,M+2,y+4.8);doc.text(val,M+IW-2,y+4.8,{align:'right'});y+=11}
-  sectionTitle('Recettes de la periode',C.green)
-  if(recsFil.length===0){doc.setFont('helvetica','italic');doc.setFontSize(8);doc.setTextColor(...C.muted);doc.text('Aucune recette sur cette periode.',M+4,y+5);y+=10}
-  else{const rCols=[{label:'DATE',w:16,color:C.muted},{label:'CLIENT',w:34,color:C.dark},{label:'DESCRIPTION',w:56,color:C.dark},{label:'CATEGORIE',w:32,color:C.dark},{label:'MONTANT',w:22,color:C.green,bold:true},{label:'STATUT',w:22,color:C.muted}];tableHeader(rCols);recsFil.forEach((r,i)=>{const sCol=r.statut==='Payé'?C.green:r.statut==='Impayé'?C.red:C.warn;tableRow(rCols.map((c,ci)=>{if(ci===4)return{...c,color:C.green,bold:true};if(ci===5)return{...c,color:sCol};return c}),[fmtS(new Date(r.date)),r.client,r.desc,r.cat,'+'+r.montant.toFixed(0)+'€',r.statut],i)});totalRow('TOTAL ENCAISSE','+'+ca.toFixed(0)+'€',C.green)}
-  checkPage(20);sectionTitle('Depenses de la periode',C.red)
-  if(depsFil.length===0){doc.setFont('helvetica','italic');doc.setFontSize(8);doc.setTextColor(...C.muted);doc.text('Aucune depense sur cette periode.',M+4,y+5);y+=10}
-  else{const dCols=[{label:'DATE',w:16,color:C.muted},{label:'LIBELLE',w:92,color:C.dark},{label:'CATEGORIE',w:46,color:C.dark},{label:'MONTANT',w:28,color:C.red,bold:true}];tableHeader(dCols);depsFil.forEach((d,i)=>{tableRow(dCols.map((c,ci)=>ci===3?{...c,color:C.red,bold:true}:c),[fmtS(new Date(d.date)),d.libelle,d.cat,MINUS+d.montant.toFixed(0)+'€'],i)});totalRow('TOTAL DEPENSES',MINUS+dep.toFixed(0)+'€',C.red)}
-  checkPage(56);sectionTitle('Bilan de la periode',C.accent)
-  const bRows=[{label:'Recettes encaissees',val:'+'+ca.toFixed(0)+'€',color:C.green},{label:'Depenses totales',val:MINUS+dep.toFixed(0)+'€',color:C.red},{label:'Impayes en cours',val:impMt.toFixed(0)+'€',color:impMt>0?C.red:C.muted},{label:'Marge nette',val:marge+'%',color:benef>=0?C.green:C.red},{label:'Benefice net',val:(benef>=0?'+':MINUS)+Math.abs(benef).toFixed(0)+'€',color:benef>=0?C.green:C.red,big:true}]
-  const BH=bRows.length*9+12;doc.setFillColor(...C.surface);doc.setDrawColor(...C.border);doc.setLineWidth(0.3);doc.roundedRect(M,y,IW,BH,2,2,'FD')
-  bRows.forEach((r,i)=>{const ry=y+8+i*9,isLast=i===bRows.length-1;if(isLast){doc.setDrawColor(...C.border);doc.setLineWidth(0.3);doc.line(M+4,ry-4,M+IW-4,ry-4)};doc.setFont('helvetica',isLast?'bold':'normal');doc.setFontSize(isLast?9.5:8.5);doc.setTextColor(...C.muted);doc.text(r.label,M+6,ry);doc.setFont('helvetica','bold');doc.setFontSize(isLast?11:8.5);doc.setTextColor(...r.color);doc.text(r.val,M+IW-6,ry,{align:'right'})})
-  const totalPages=doc.internal.getNumberOfPages()
-  for(let p=1;p<=totalPages;p++){doc.setPage(p);doc.setFillColor(...C.dark);doc.rect(0,H-10,W,10,'F');doc.setFillColor(...C.accent);doc.rect(0,H-10,4,10,'F');doc.setFont('helvetica','normal');doc.setFontSize(6.5);doc.setTextColor(150,142,130);doc.text('MK Pilote - Rapport confidentiel - '+genDate,M+2,H-4.5);doc.text('mkpilote.fr  Page '+p+'/'+totalPages,W-M,H-4.5,{align:'right'})}
-  doc.save(filename);showToast('Rapport telecharge ✓','var(--success)')
+  closeModal('exportModal')
+  try {
+    showToast('Génération du rapport...','var(--pro)')
+    const{jsPDF}=window.jspdf,doc=new jsPDF({orientation:'portrait',unit:'mm',format:'a4'})
+    const W=210,H=297,M=14,IW=182
+    const filtered=getFilteredOps(exportDebut,exportFin),recsFil=filtered.recettes,depsFil=filtered.depenses
+    const ca=recsFil.filter(r=>r.statut==='Payé').reduce((s,r)=>s+r.montant,0)
+    const dep=depsFil.reduce((s,d)=>s+d.montant,0),benef=ca-dep
+    const impMt=recsFil.filter(r=>r.statut==='Impayé'||r.statut==='En attente').reduce((s,r)=>s+r.montant,0)
+    const marge=ca>0?((benef/ca)*100).toFixed(1):'0.0'
+    const fmtD=d=>d.toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})
+    const fmtS=d=>d.toLocaleDateString('fr-FR',{day:'2-digit',month:'2-digit'})
+    const periodeStr=fmtD(exportDebut)+' au '+fmtD(exportFin),genDate=new Date().toLocaleDateString('fr-FR',{day:'numeric',month:'long',year:'numeric'})
+    const filename='MK-Pilote-'+fmtS(exportDebut).replace('/','.')+'-'+fmtS(exportFin).replace('/','.')+'.pdf'
+    const C={dark:[26,23,20],white:[255,255,255],accent:[212,90,30],green:[34,107,64],red:[170,35,25],warn:[150,100,15],muted:[140,132,122],bg:[248,245,240],surface:[253,251,248],border:[220,215,207],pro:[100,40,200]}
+    const MINUS='-';let y=0
+    doc.setFillColor(...C.dark);doc.rect(0,0,W,46,'F');doc.setFillColor(...C.accent);doc.rect(0,0,4,46,'F')
+    doc.setFont('helvetica','bold');doc.setFontSize(20);doc.setTextColor(...C.white);doc.text('MK Pilote',M+2,17);doc.setTextColor(...C.accent);doc.text('.',M+2+doc.getTextWidth('MK Pilote'),17)
+    doc.setFont('helvetica','normal');doc.setFontSize(7);doc.setTextColor(170,162,150);doc.text('RAPPORT DE PILOTAGE',M+2,25)
+    doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(...C.white);doc.text(periodeStr.toUpperCase(),M+2,38)
+    doc.setFont('helvetica','normal');doc.setFontSize(7);doc.setTextColor(150,142,130);doc.text('Genere le '+genDate,W-M,25,{align:'right'})
+    doc.setFillColor(...C.pro);doc.roundedRect(W-M-18,31,18,7,1.5,1.5,'F');doc.setTextColor(...C.white);doc.setFontSize(7);doc.setFont('helvetica','bold');doc.text('PRO',W-M-9,36,{align:'center'})
+    y=54
+    const kpis=[{label:'Recettes encaissees',val:ca.toFixed(0)+'E',bar:C.green,col:C.green},{label:'Depenses totales',val:MINUS+dep.toFixed(0)+'E',bar:C.red,col:C.red},{label:'Benefice net',val:(benef>=0?'+':MINUS)+Math.abs(benef).toFixed(0)+'E',bar:benef>=0?C.green:C.red,col:benef>=0?C.green:C.red},{label:'Impayes',val:impMt.toFixed(0)+'E',bar:impMt>0?C.red:C.muted,col:impMt>0?C.red:C.muted}]
+    const KW=(IW-9)/4,KH=25
+    kpis.forEach((k,i)=>{const x=M+i*(KW+3);doc.setFillColor(...C.surface);doc.setDrawColor(...C.border);doc.setLineWidth(0.25);doc.roundedRect(x,y,KW,KH,1.5,1.5,'FD');doc.setFillColor(...k.bar);doc.rect(x,y,KW,2,'F');doc.setFont('helvetica','normal');doc.setFontSize(6.5);doc.setTextColor(...C.muted);doc.text(k.label.toUpperCase(),x+3,y+8);doc.setFont('helvetica','bold');doc.setFontSize(13);doc.setTextColor(...k.col);doc.text(k.val.replace('E','€'),x+3,y+20)})
+    y+=KH+5
+    doc.setFillColor(...C.bg);doc.setDrawColor(...C.border);doc.setLineWidth(0.25);doc.roundedRect(M,y,IW,9,1.5,1.5,'FD');doc.setFont('helvetica','normal');doc.setFontSize(8);doc.setTextColor(...C.muted);doc.text('Marge nette :',M+4,y+6);doc.setFont('helvetica','bold');doc.setTextColor(...(benef>=0?C.green:C.red));doc.text(marge+'%',M+28,y+6)
+    y+=14
+    const checkPage=(n=15)=>{if(y+n>H-14){doc.addPage();y=14}}
+    const sectionTitle=(title,color)=>{checkPage(14);doc.setFillColor(...color);doc.rect(M,y,3,5.5,'F');doc.setFont('helvetica','bold');doc.setFontSize(10);doc.setTextColor(...C.dark);doc.text(title,M+6,y+4.5);y+=9}
+    const tableHeader=(cols)=>{checkPage(10);doc.setFillColor(...C.dark);doc.rect(M,y,IW,6.5,'F');doc.setFont('helvetica','bold');doc.setFontSize(6.5);doc.setTextColor(...C.white);let x=M;cols.forEach(c=>{doc.text(c.label,x+2,y+4.5);x+=c.w});y+=6.5}
+    const tableRow=(cols,vals,idx)=>{const RH=6.5;checkPage(RH+2);if(idx%2===0){doc.setFillColor(...C.bg);doc.rect(M,y,IW,RH,'F')}let x=M;cols.forEach((c,i)=>{const raw=String(vals[i]||'');const maxC=Math.floor(c.w/1.6);const txt=raw.length>maxC?raw.slice(0,maxC-1)+'...':raw;doc.setFont('helvetica',c.bold?'bold':'normal');doc.setFontSize(7.5);doc.setTextColor(...(c.color||C.dark));doc.text(txt,x+2,y+4.5);x+=c.w});doc.setDrawColor(...C.border);doc.setLineWidth(0.2);doc.line(M,y+RH,M+IW,y+RH);y+=RH}
+    const totalRow=(label,val,color)=>{checkPage(8);doc.setFillColor(...color);doc.rect(M,y,IW,7,'F');doc.setFont('helvetica','bold');doc.setFontSize(7.5);doc.setTextColor(...C.white);doc.text(label,M+2,y+4.8);doc.text(val,M+IW-2,y+4.8,{align:'right'});y+=11}
+    sectionTitle('Recettes de la periode',C.green)
+    if(recsFil.length===0){doc.setFont('helvetica','italic');doc.setFontSize(8);doc.setTextColor(...C.muted);doc.text('Aucune recette sur cette periode.',M+4,y+5);y+=10}
+    else{const rCols=[{label:'DATE',w:16,color:C.muted},{label:'CLIENT',w:34,color:C.dark},{label:'DESCRIPTION',w:56,color:C.dark},{label:'CATEGORIE',w:32,color:C.dark},{label:'MONTANT',w:22,color:C.green,bold:true},{label:'STATUT',w:22,color:C.muted}];tableHeader(rCols);recsFil.forEach((r,i)=>{const sCol=r.statut==='Payé'?C.green:r.statut==='Impayé'?C.red:C.warn;tableRow(rCols.map((c,ci)=>{if(ci===4)return{...c,color:C.green,bold:true};if(ci===5)return{...c,color:sCol};return c}),[fmtS(new Date(r.date)),r.client||'-',r.desc,r.cat,'+'+r.montant.toFixed(0)+'€',r.statut],i)});totalRow('TOTAL ENCAISSE','+'+ca.toFixed(0)+'€',C.green)}
+    checkPage(20);sectionTitle('Depenses de la periode',C.red)
+    if(depsFil.length===0){doc.setFont('helvetica','italic');doc.setFontSize(8);doc.setTextColor(...C.muted);doc.text('Aucune depense sur cette periode.',M+4,y+5);y+=10}
+    else{const dCols=[{label:'DATE',w:16,color:C.muted},{label:'LIBELLE',w:92,color:C.dark},{label:'CATEGORIE',w:46,color:C.dark},{label:'MONTANT',w:28,color:C.red,bold:true}];tableHeader(dCols);depsFil.forEach((d,i)=>{tableRow(dCols.map((c,ci)=>ci===3?{...c,color:C.red,bold:true}:c),[fmtS(new Date(d.date)),d.libelle,d.cat,MINUS+d.montant.toFixed(0)+'€'],i)});totalRow('TOTAL DEPENSES',MINUS+dep.toFixed(0)+'€',C.red)}
+    checkPage(56);sectionTitle('Bilan de la periode',C.accent)
+    const bRows=[{label:'Recettes encaissees',val:'+'+ca.toFixed(0)+'€',color:C.green},{label:'Depenses totales',val:MINUS+dep.toFixed(0)+'€',color:C.red},{label:'Impayes en cours',val:impMt.toFixed(0)+'€',color:impMt>0?C.red:C.muted},{label:'Marge nette',val:marge+'%',color:benef>=0?C.green:C.red},{label:'Benefice net',val:(benef>=0?'+':MINUS)+Math.abs(benef).toFixed(0)+'€',color:benef>=0?C.green:C.red}]
+    const BH=bRows.length*9+12;doc.setFillColor(...C.surface);doc.setDrawColor(...C.border);doc.setLineWidth(0.3);doc.roundedRect(M,y,IW,BH,2,2,'FD')
+    bRows.forEach((r,i)=>{const ry=y+8+i*9,isLast=i===bRows.length-1;if(isLast){doc.setDrawColor(...C.border);doc.setLineWidth(0.3);doc.line(M+4,ry-4,M+IW-4,ry-4)};doc.setFont('helvetica',isLast?'bold':'normal');doc.setFontSize(isLast?9.5:8.5);doc.setTextColor(...C.muted);doc.text(r.label,M+6,ry);doc.setFont('helvetica','bold');doc.setFontSize(isLast?11:8.5);doc.setTextColor(...r.color);doc.text(r.val,M+IW-6,ry,{align:'right'})})
+    const totalPages=doc.internal.getNumberOfPages()
+    for(let p=1;p<=totalPages;p++){doc.setPage(p);doc.setFillColor(...C.dark);doc.rect(0,H-10,W,10,'F');doc.setFillColor(...C.accent);doc.rect(0,H-10,4,10,'F');doc.setFont('helvetica','normal');doc.setFontSize(6.5);doc.setTextColor(150,142,130);doc.text('MK Pilote - Rapport confidentiel - '+genDate,M+2,H-4.5);doc.text('mkpilote.fr  Page '+p+'/'+totalPages,W-M,H-4.5,{align:'right'})}
+    doc.save(filename)
+    showToast('Rapport téléchargé ✓','var(--success)')
+  } catch(err){
+    console.error('PDF error:',err)
+    showToast('⚠ Erreur PDF — réessaie','var(--danger)')
+  }
 }
 
 // Init
-const now=new Date(),y=now.getFullYear(),m=now.getMonth()
-exportDebut=new Date(y,m,1);exportFin=new Date(y,m+1,0)
 applyPlan()
+
 </script>
 </body>
 </html>
