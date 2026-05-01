@@ -681,7 +681,17 @@ function showLoading(v){
 }
 
 // Auth state listener — point d'entrée principal
+let authHandled = false
+const loadingTimeout = setTimeout(()=>{
+  if(!authHandled){
+    showLoading(false)
+    document.getElementById('auth-screen').style.display = 'flex'
+  }
+}, 4000)
+
 sb.auth.onAuthStateChange(async (event, session) => {
+  authHandled = true
+  clearTimeout(loadingTimeout)
   if(session && session.user){
     currentUser = session.user
     document.getElementById('auth-screen').style.display = 'none'
@@ -689,13 +699,18 @@ sb.auth.onAuthStateChange(async (event, session) => {
     const initials = currentUser.email.slice(0,2).toUpperCase()
     document.getElementById('topbar-avatar').textContent = initials
     showLoading(true)
-    await loadAllData()
+    try {
+      await loadAllData()
+    } catch(e) {
+      console.error(e)
+    }
     showLoading(false)
   } else {
     currentUser = null
     recettes=[]; depenses=[]; clients=[]
     renderAll()
     document.getElementById('auth-screen').style.display = 'flex'
+    showLoading(false)
   }
 })
 
